@@ -452,6 +452,8 @@ type mllambda =
   | MLif           of mllambda * mllambda * mllambda
   | MLmatch        of mllambda * mllambda * mllam_branches
                               (* argument, prefix, accu branch, branches *)
+  | MLmatch_noaccu        of annot_sw * mllambda * mllam_branches
+                              (* argument, prefix, branches *)
   | MLconstruct    of string * inductive * int * mllambda array
                    (* prefix, inductive name, tag, arguments *)
   | MLint          of int
@@ -521,6 +523,10 @@ let rec eq_mllambda gn1 gn2 n env1 env2 t1 t2 =
       eq_mllambda gn1 gn2 n env1 env2 c1 c2 &&
       eq_mllambda gn1 gn2 n env1 env2 accu1 accu2 &&
       eq_mllam_branches gn1 gn2 n env1 env2 br1 br2
+  | MLmatch_noaccu (annot1, c1, br1), MLmatch_noaccu (annot2, c2, br2) ->
+      eq_annot_sw annot1 annot2 &&
+      eq_mllambda gn1 gn2 n env1 env2 c1 c2 &&
+      eq_mllam_branches gn1 gn2 n env1 env2 br1 br2
   | MLconstruct (pf1, ind1, tag1, args1), MLconstruct (pf2, ind2, tag2, args2) ->
       String.equal pf1 pf2 &&
       Ind.UserOrd.equal ind1 ind2 &&
@@ -547,7 +553,7 @@ let rec eq_mllambda gn1 gn2 n env1 env2 t1 t2 =
     String.equal s1 s2 && Ind.UserOrd.equal ind1 ind2 &&
     eq_mllambda gn1 gn2 n env1 env2 ml1 ml2
   | (MLlocal _ | MLglobal _ | MLprimitive _ | MLlam _ | MLletrec _ | MLlet _ |
-    MLapp _ | MLif _ | MLmatch _ | MLconstruct _ | MLint _ | MLuint _ |
+    MLapp _ | MLif _ | MLmatch _ | MLmatch_noaccu _ | MLconstruct _ | MLint _ | MLuint _ |
     MLfloat _ | MLstring _ | MLsetref _ | MLsequence _ |
     MLarray _ | MLisaccu _), _ -> false
 
@@ -613,32 +619,36 @@ let rec hash_mllambda gn n env t =
   | MLmatch (c, accu, br) ->
       let hc = hash_mllambda gn n env c in
       let haccu = hash_mllambda gn n env accu in
-      combinesmall 9 (hash_mllam_branches gn n env (combine hc haccu) br)
+      combinesmall 9 (hash_mllam_branches gn n env (combine3 hannot hc haccu) br)
+  | MLmatch_noaccu (annot, c, br) ->
+      let hannot = hash_annot_sw annot in
+      let hc = hash_mllambda gn n env c in
+      combinesmall 10 (hash_mllam_branches gn n env (combine hannot hc) br)
   | MLconstruct (pf, ind, tag, args) ->
       let hpf = String.hash pf in
       let hcs = Ind.UserOrd.hash ind in
       let htag = Int.hash tag in
-      combinesmall 10 (hash_mllambda_array gn n env (combine3 hpf hcs htag) args)
+      combinesmall 11 (hash_mllambda_array gn n env (combine3 hpf hcs htag) args)
   | MLint i ->
-      combinesmall 11 i
+      combinesmall 12 i
   | MLuint i ->
-      combinesmall 12 (Uint63.hash i)
+      combinesmall 13 (Uint63.hash i)
   | MLsetref (id, ml) ->
       let hid = String.hash id in
       let hml = hash_mllambda gn n env ml in
-      combinesmall 13 (combine hid hml)
+      combinesmall 14 (combine hid hml)
   | MLsequence (ml, ml') ->
       let hml = hash_mllambda gn n env ml in
       let hml' = hash_mllambda gn n env ml' in
-      combinesmall 14 (combine hml hml')
+      combinesmall 15 (combine hml hml')
   | MLarray arr ->
-      combinesmall 15 (hash_mllambda_array gn n env 1 arr)
+      combinesmall 16 (hash_mllambda_array gn n env 1 arr)
   | MLisaccu (s, ind, c) ->
-      combinesmall 16 (combine (String.hash s) (combine (Ind.UserOrd.hash ind) (hash_mllambda gn n env c)))
+      combinesmall 17 (combine (String.hash s) (combine (Ind.UserOrd.hash ind) (hash_mllambda gn n env c)))
   | MLfloat f ->
-      combinesmall 17 (Float64.hash f)
+      combinesmall 18 (Float64.hash f)
   | MLstring s ->
-      combinesmall 18 (Pstring.hash s)
+      combinesmall 19 (Pstring.hash s)
 
 and hash_mllambda_letrec gn n env init defs =
   let hash_def (_,args,ml) =
@@ -695,6 +705,21 @@ let fv_lam l =
         aux t bind (aux b1 bind (aux b2 bind fv))
     | MLmatch(a,p,bs) ->
       let fv = aux a bind (aux p bind fv) in
+      let fv_bs (cargs, body) fv =
+        let bind =
+          List.fold_right (fun pat bind ->
+              match pat with
+              | ConstPattern _ -> bind
+              | NonConstPattern(_,args) ->
+                Array.fold_right
+                  (fun o bind -> match o with
+                     | Some l -> LNset.add l bind
+                     | _ -> bind) args bind)
+            cargs bind in
+        aux body bind fv in
+      Array.fold_right fv_bs bs fv
+    | MLmatch_noaccu(_,p,bs) ->
+      let fv = aux p bind fv in
       let fv_bs (cargs, body) fv =
         let bind =
           List.fold_right (fun pat bind ->
@@ -1606,7 +1631,10 @@ let subst s l =
       | MLif(t,b1,b2) -> MLif(aux t, aux b1, aux b2)
       | MLmatch(a,accu,bs) ->
           let auxb (cargs,body) = (cargs,aux body) in
-          MLmatch(a,aux accu, Array.map auxb bs)
+          MLmatch(annot,a,aux accu, Array.map auxb bs)
+      | MLmatch_noaccu(annot,a,bs) ->
+          let auxb (cargs,body) = (cargs,aux body) in
+          MLmatch_noaccu(annot,a, Array.map auxb bs)
       | MLconstruct(prefix,c,tag,args) -> MLconstruct(prefix,c,tag,Array.map aux args)
       | MLsetref(s,l1) -> MLsetref(s,aux l1)
       | MLsequence(l1,l2) -> MLsequence(aux l1, aux l2)
@@ -1717,7 +1745,10 @@ let optimize gdef l =
         end
     | MLmatch(a,accu,bs) ->
         let opt_b (cargs,body) = (cargs,optimize s body) in
-        MLmatch(optimize s a, subst s accu, Array.map opt_b bs)
+        MLmatch(annot, optimize s a, subst s accu, Array.map opt_b bs)
+    | MLmatch_noaccu(annot,a,bs) ->
+        let opt_b (cargs,body) = (cargs,optimize s body) in
+        MLmatch_noaccu(annot, optimize s a, Array.map opt_b bs)
     | MLconstruct(prefix,c,tag,args) ->
         MLconstruct(prefix,c,tag,Array.map (optimize s) args)
     | MLsetref(r,l) -> MLsetref(r, optimize s l)
@@ -1897,6 +1928,10 @@ let pp_mllam fmt l =
       Format.fprintf fmt (* accumulator is always tag 0 *)
         "@[(let ($matched_value %a) (switch $matched_value @\n@ @ ((tag 0)@\n    %a)@\n  @[%a@]))@]"
         pp_mllam c pp_mllam accu_br pp_branches br
+    | MLmatch_noaccu (_, c, br) ->
+      Format.fprintf fmt
+        "@[(let ($matched_value %a) (switch $matched_value @\n@ @ @[%a@]))@]"
+        pp_mllam c pp_branches br
     | MLconstruct(_,_,tag,[||]) -> (* not a construct but a constant *)
         Format.fprintf fmt "%i"
           tag
@@ -2014,7 +2049,10 @@ let pp_cofix fmt (gn, s) =
       | MLif(t,b1,b2) -> MLif(aux t, aux b1, aux b2)
       | MLmatch(a,accu,bs) ->
           let auxb (cargs,body) = (cargs,aux body) in
-          MLmatch(a,aux accu, Array.map auxb bs)
+          MLmatch(annot,a,aux accu, Array.map auxb bs)
+      | MLmatch_noaccu(annot,a,bs) ->
+          let auxb (cargs,body) = (cargs,aux body) in
+          MLmatch_noaccu(annot,a, Array.map auxb bs)
       | MLconstruct(prefix,c,tag,args) -> MLconstruct(prefix,c,tag,Array.map aux args)
       | MLsetref(s,l1) -> MLsetref(s,aux l1)
       | MLsequence(l1,l2) -> MLsequence(aux l1, aux l2)
