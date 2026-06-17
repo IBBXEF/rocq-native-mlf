@@ -772,6 +772,8 @@ type global =
   | Glet of gname * mllambda
   | Gletcase of
       gname * lname array * mllambda * mllambda * mllam_branches
+  | Gletcase_noaccu of
+      gname * lname array * mllambda * mllam_branches
   | Gopen of string
   | Gtype of inductive * (tag * int) array
     (* ind name, tag and arities of constructors *)
@@ -831,6 +833,11 @@ let hash_global g =
       let nlns = Array.length lns in
       let env = push_lnames 0 LNmap.empty lns in
       let t = MLmatch (c,accu,br) in
+      combinesmall 5 (combine nlns (hash_mllambda gn nlns env t))
+  | Gletcase_noaccu (gn,lns,c,br) ->
+      let nlns = Array.length lns in
+      let env = push_lnames 0 LNmap.empty lns in
+      let t = MLmatch_noaccu (c,br) in
       combinesmall 5 (combine nlns (hash_mllambda gn nlns env t))
   | Gopen s -> combinesmall 5 (String.hash s)
   | Gtype (ind, arr) ->
@@ -2112,6 +2119,16 @@ let pp_global fmt g =
       (hash_global g)
         pp_gname gn pp_ldecls params
         pp_mllam (MLmatch(a,accu,bs))
+  | Gletcase_noaccu(gn,[||],a,bs) -> (* simple biding and not a function *)
+      Format.fprintf fmt "@[; Hash = %i@\n(%a %a)@]@\n@." (* no need to be recursive as we are sane and do not create recursive values other than functions *)
+      (hash_global g)
+        pp_gname gn
+        pp_mllam (MLmatch_noaccu(a,bs))
+  | Gletcase_noaccu(gn,params,a,bs) -> (* a function *)
+      Format.fprintf fmt "@[; Hash = %i@\n(rec (%a (lambda (%a)@\n  %a)))@]@\n@."
+      (hash_global g)
+        pp_gname gn pp_ldecls params
+        pp_mllam (MLmatch_noaccu(a,bs))
   | Gtblfixtype (g, [||], t) -> (* not a function but a definition *)
       Format.fprintf fmt "@[<2>(%a %a)@]@\n@." pp_gname g
         pp_array t
@@ -2140,6 +2157,7 @@ let global_to_mlf_name g =
   | Gtblnorm (gn,_,_)
   | Gtblcofix (gn,_,_)
   | Gletcase(gn,_,_,_,_)
+  | Gletcase_noaccu(gn,_,_,_)
   | Glet (gn,_) ->
     let gn = string_of_gname gn in
     if gn = "_" || gn = "" then None else Some gn
@@ -2153,6 +2171,7 @@ let pp_global_interface fmt g =
   | Gtblcofix (_,_,_)
   | Gtblfixtype (_,_,_)
   | Gletcase (_,_,_,_,_)
+  | Gletcase_noaccu (_,_,_,_)
   | Glet (_,_) ->
     begin match global_to_mlf_name g with
     | None -> ()
