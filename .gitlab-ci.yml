@@ -84,6 +84,8 @@ before_script:
       - config/dune.c_flags
     expire_in: 1 week
   script:
+    - apt update
+    - apt install -y linux-tools
     - cp dev/ci/dune-workspace.ci dune-workspace
 
     - PKGS=rocq-runtime,coq-core,rocq-core,coqide-server,rocq-devtools
